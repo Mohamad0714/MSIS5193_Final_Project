@@ -1,8 +1,8 @@
 streamlit
+transformers
+accelerate
+torch
 pypdf
 python-docx
 beautifulsoup4
-requests
-huggingface_hub
-torch
-transformers
+tiktoken
