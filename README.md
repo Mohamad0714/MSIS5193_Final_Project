@@ -8,7 +8,7 @@ This Streamlit app lets you:
 
 ## Live demo
 
-https://<your-app-name>.streamlit.app
+[https://<your-app-name>.streamlit.app](https://msis5193finalproject-he6juy7qoxxaaqlcm2rbrb.streamlit.app/)
 
 ## How to run locally
 
