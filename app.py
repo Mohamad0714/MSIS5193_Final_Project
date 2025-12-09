@@ -215,7 +215,6 @@ def main():
                 if not abbrev_lines:
                     st.markdown("_No abbreviations found._")
                 else:
-                    # Display as a simple list (no extra explanations)
                     for line in abbrev_lines:
                         st.write(line)
 
