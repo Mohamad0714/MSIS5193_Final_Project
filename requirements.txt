@@ -4,3 +4,4 @@ pypdf
 python-docx
 beautifulsoup4
 torch
+requests
