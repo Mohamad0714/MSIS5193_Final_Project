@@ -1,16 +1,17 @@
 import os
-import re  # for cleaning abbreviation output
+import re
 
-# Make Streamlit + torch behave nicely on Windows
+# Make Streamlit behave nicely on Windows (optional, harmless elsewhere)
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
 import streamlit as st
 from pypdf import PdfReader
 import docx
 from bs4 import BeautifulSoup
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+from huggingface_hub import InferenceClient
 
-# ------------- Streamlit page config ------------- #
+
+# ---------------- Streamlit page config ---------------- #
 
 st.set_page_config(
     page_title="LLM Document App",
@@ -18,34 +19,42 @@ st.set_page_config(
     layout="wide",
 )
 
-# ------------- LLM loading (Hugging Face) ------------- #
+
+# ---------------- LLM loading (Hugging Face Inference API) ---------------- #
 
 @st.cache_resource
 def load_llm():
     """
-    Load a small, instruction-tuned open-source model from Hugging Face.
-    The model weights and cache will go to F:\\LLM_CACHE (because of the
-    environment variables you already set: HF_HOME / TRANSFORMERS_CACHE / TORCH_HOME).
+    Create an InferenceClient that calls a small instruction-tuned model
+    on the Hugging Face Inference API.
+
+    You must define HF_TOKEN in Streamlit Cloud secrets:
+        HF_TOKEN = "hf_XXXXXXXXXXXXXXXXXXXXXXXX"
     """
+    # Try Streamlit secrets first (cloud), then fall back to env var (local)
+    hf_token = None
+    try:
+        hf_token = st.secrets.get("HF_TOKEN", None)
+    except Exception:
+        # st.secrets may not exist when running only in local dev
+        pass
+
+    if not hf_token:
+        hf_token = os.environ.get("HF_TOKEN")
+
+    if not hf_token:
+        raise RuntimeError(
+            "HF_TOKEN is not set. "
+            "In Streamlit Cloud, go to Settings → Secrets and add HF_TOKEN."
+        )
+
     model_name = "Qwen/Qwen2.5-0.5B-Instruct"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        device_map="auto",
-        torch_dtype="auto",
-    )
+    client = InferenceClient(model=model_name, token=hf_token)
+    return client
 
-    gen = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        max_new_tokens=256,
-        do_sample=False,  # more deterministic / less random
-    )
-    return gen
 
-# ------------- File reading helpers ------------- #
+# ---------------- File reading helpers ---------------- #
 
 def read_pdf(uploaded_file):
     reader = PdfReader(uploaded_file)
@@ -54,9 +63,11 @@ def read_pdf(uploaded_file):
         text += page.extract_text() or ""
     return text
 
+
 def read_docx(uploaded_file):
     doc = docx.Document(uploaded_file)
     return "\n".join(p.text for p in doc.paragraphs)
+
 
 def read_txt(uploaded_file):
     data = uploaded_file.read()
@@ -65,52 +76,62 @@ def read_txt(uploaded_file):
     except Exception:
         return data.decode("latin-1", errors="ignore")
 
+
 def read_html(uploaded_file):
     data = uploaded_file.read()
-    soup = BeautifulSoup(data.decode("utf-8", errors="ignore"), "html.parser")
+    try:
+        html = data.decode("utf-8", errors="ignore")
+    except Exception:
+        html = str(data)
+    soup = BeautifulSoup(html, "html.parser")
     return soup.get_text(separator="\n")
+
 
 def extract_text_from_file(uploaded_file):
     """
-    Detect file type and return plain text.
+    Detect file type by extension and read text accordingly.
     """
     name = uploaded_file.name.lower()
-    uploaded_file.seek(0)
-
     if name.endswith(".pdf"):
         return read_pdf(uploaded_file)
     if name.endswith(".docx"):
         return read_docx(uploaded_file)
     if name.endswith(".txt"):
         return read_txt(uploaded_file)
-    if name.endswith(".html") or name.endswith(".htm"):
+    if name.endswith(".htm") or name.endswith(".html"):
         return read_html(uploaded_file)
 
-    return ""
+    # Fallback: try treating it as text
+    return read_txt(uploaded_file)
 
-# ------------- Helper: clean abbreviation output ------------- #
 
-def clean_abbrev_answer(raw_answer: str) -> list[str]:
+# ---------------- Post-processing for abbreviation mode ---------------- #
+
+def clean_abbrev_answer(raw_answer):
     """
     Take the raw LLM output and keep only lines of the form:
-    ABBR: full term
+        ABBR: full term
 
     Returns a list of cleaned "ABBR: full term" strings.
     """
     clean_lines = []
+
     for line in raw_answer.splitlines():
         line = line.strip()
         if not line:
             continue
-        # pattern: ABBR: full term
-        m = re.match(r'^([A-Z][A-Z0-9]{1,10})\s*:\s*(.+)$', line)
-        if m:
-            abbr = m.group(1).strip()
-            full = m.group(2).strip()
+
+        # Pattern: ABBR: full term
+        match = re.match(r"^([A-Z][A-Z0-9]{1,10})\s*:\s*(.+)$", line)
+        if match:
+            abbr = match.group(1).strip()
+            full = match.group(2).strip()
             clean_lines.append(f"{abbr}: {full}")
+
     return clean_lines
 
-# ------------- Main app ------------- #
+
+# ---------------- Main app ---------------- #
 
 def main():
     st.title("Input to AI")
@@ -121,153 +142,135 @@ def main():
 
     st.markdown("---")
 
-    question = st.text_area("Your question:", height=120)
+    # User input
+    user_question = st.text_area(
+        "Your question:",
+        height=120,
+        placeholder=(
+            "Example for abbreviations:\n"
+            "Extract all full term (ABBREVIATION) pairs from the document. "
+            "List them, one per line, using the format ABBREVIATION: full term."
+        ),
+    )
 
     uploaded_files = st.file_uploader(
         "Upload files (optional):",
-        type=["pdf", "docx", "txt", "html", "htm"],
+        type=["pdf", "docx", "txt", "htm", "html"],
         accept_multiple_files=True,
     )
 
-    if st.button("Get Answer", type="primary"):
-        if not question.strip():
-            st.warning("Please type a question first.")
+    # Decide whether we are in abbreviation mode
+    # Simple heuristic: user mentions 'abbreviation'
+    abbreviation_mode = "abbreviation" in user_question.lower()
+
+    if abbreviation_mode:
+        st.markdown("### AI Response (Abbreviation Index):")
+    else:
+        st.markdown("### AI Response:")
+
+    if st.button("Get Answer"):
+        if not user_question.strip():
+            st.warning("Please enter a question first.")
             return
 
-        lower_q = question.lower()
-        is_abbrev_task = (
-            "abbreviation" in lower_q
-            or "abbreviations" in lower_q
-            or "abbrev" in lower_q
-        )
-
-        with st.spinner("Thinking..."):
+        try:
             llm = load_llm()
+        except Exception as e:
+            st.error(f"Error loading the model: {e}")
+            return
 
-            # ---------- SPECIAL MODE: Abbreviation index per article ---------- #
-            if uploaded_files and is_abbrev_task:
-                st.subheader("AI Response (Abbreviation Index):")
+        # -------------- ABBREVIATION MODE -------------- #
+        if abbreviation_mode and uploaded_files:
+            for uploaded in uploaded_files:
+                document_text = extract_text_from_file(uploaded) or ""
 
-                for uploaded in uploaded_files:
-                    doc_text = extract_text_from_file(uploaded)
-                    if not doc_text:
-                        continue
+                # To avoid sending extremely long documents, truncate
+                max_chars = 8000
+                truncated_text = document_text[:max_chars]
 
-                    # Limit context length for tiny model
-                    max_chars = 6000
-                    if len(doc_text) > max_chars:
-                        doc_text = doc_text[:max_chars]
-
-                    prompt = (
-                        "You are an assistant that EXTRACTS ABBREVIATIONS "
-                        "from scientific documents.\n"
-                        "Your task is to build an abbreviation index from the DOCUMENT below.\n"
-                        "An abbreviation index is a list like:\n"
-                        "WDC: weighted degree centrality\n"
-                        "SH: structural holes\n"
-                        "ERGM: exponential random graph model\n"
-                        "\n"
-                        "Rules:\n"
-                        "- Only include abbreviations that actually appear in the document.\n"
-                        "- Most abbreviations appear in the form 'full term (ABBR)'. Use that pattern.\n"
-                        "- The left side must be just the abbreviation token (e.g., 'WDC', 'ERGM', 'CAS').\n"
-                        "- The right side must be the full term from the document, written clearly.\n"
-                        "- Do NOT invent or guess abbreviations not supported by the text.\n"
-                        "- Do NOT add explanations, bullets, or extra sentences.\n"
-                        "- Output ONLY the index, one abbreviation per line, in the format 'ABBR: full term'.\n"
-                        "\n"
-                        "[DOCUMENT]\n"
-                        f"{doc_text}\n\n"
-                        "[ANSWER]\n"
-                    )
-
-                    result = llm(prompt)[0]["generated_text"]
-
-                    # Strip prompt part
-                    if "[ANSWER]" in result:
-                        answer = result.split("[ANSWER]", 1)[-1].strip()
-                    elif "Answer:" in result:
-                        answer = result.split("Answer:", 1)[-1].strip()
-                    else:
-                        answer = result.strip()
-
-                    # Clean to only ABBR: full term lines
-                    abbrev_lines = clean_abbrev_answer(answer)
-
-                    st.markdown(f"### File: `{uploaded.name}`")
-                    if not abbrev_lines:
-                        st.markdown("_No abbreviations found._")
-                    else:
-                        # Format like bullet list: - **WDC**: weighted degree centrality
-                        bullets = []
-                        for line in abbrev_lines:
-                            abbr, full = line.split(":", 1)
-                            bullets.append(f"- **{abbr.strip()}**: {full.strip()}")
-                        st.markdown("\n".join(bullets))
-
-                # We’re done in abbreviation mode
-                return
-
-            # ---------- NORMAL QA MODES (combined docs or no docs) ---------- #
-
-            # Collect text from all uploaded documents (if any)
-            doc_texts = []
-            if uploaded_files:
-                for f in uploaded_files:
-                    text = extract_text_from_file(f)
-                    if text:
-                        doc_texts.append(text)
-
-            document_text = "\n\n".join(doc_texts)
-
-            # Limit context length
-            max_chars = 6000
-            if len(document_text) > max_chars:
-                document_text = document_text[:max_chars]
-
-            # Build the prompt for non-abbreviation tasks
-            if document_text:
                 prompt = (
-                    "You are a helpful assistant.\n"
-                    "Use ONLY the document text below to answer the question.\n"
-                    "If the answer is not in the document, say exactly:\n"
-                    "'I am not sure based on the document.'\n"
-                    "Use clear, short sentences.\n\n"
-                    "[DOCUMENT]\n"
-                    f"{document_text}\n\n"
-                    "[QUESTION]\n"
-                    f"{question}\n\n"
-                    "[ANSWER]"
+                    "You are an AI that extracts abbreviation definitions from academic text.\n\n"
+                    "TASK:\n"
+                    "From the document text below, extract all pairs where an abbreviation is "
+                    "defined by its full term. Return ONLY one pair per line, using the format:\n"
+                    "ABBREVIATION: full term\n\n"
+                    "Do not include any explanations, notes, or extra text. Do not add bullet points.\n\n"
+                    f"DOCUMENT TEXT:\n{truncated_text}\n\n"
+                    "Now return the abbreviation index:"
+                )
+
+                try:
+                    raw_answer = llm.text_generation(
+                        prompt,
+                        max_new_tokens=256,
+                        temperature=0.0,
+                    )
+                except Exception as e:
+                    st.error(f"Error calling the model: {e}")
+                    return
+
+                abbrev_lines = clean_abbrev_answer(raw_answer)
+
+                st.markdown(f"#### File: `{uploaded.name}`")
+                if not abbrev_lines:
+                    st.markdown("_No abbreviations found._")
+                else:
+                    # Display as a simple list (no extra explanations)
+                    for line in abbrev_lines:
+                        st.write(line)
+
+            return  # Done in abbreviation mode
+
+        # -------------- GENERAL QA MODE -------------- #
+
+        # Collect document text (if any)
+        combined_text = ""
+        if uploaded_files:
+            all_texts = []
+            for uploaded in uploaded_files:
+                text = extract_text_from_file(uploaded)
+                if text:
+                    all_texts.append(f"--- File: {uploaded.name} ---\n{text}")
+            combined_text = "\n\n".join(all_texts)
+
+        try:
+            if combined_text:
+                # Limit how much text we send
+                max_chars = 12000
+                truncated = combined_text[:max_chars]
+
+                prompt = (
+                    "You are a helpful assistant answering questions about documents.\n\n"
+                    f"USER QUESTION:\n{user_question}\n\n"
+                    "DOCUMENTS:\n"
+                    f"{truncated}\n\n"
+                    "Use the documents above to answer the question as clearly as possible. "
+                    "If something is not in the documents, you may answer from general knowledge."
                 )
             else:
-                # No document, general QA
+                # No documents uploaded – general Q&A
                 prompt = (
-                    "You are a helpful assistant.\n"
-                    "Answer the question clearly and stay on topic.\n\n"
-                    f"Question: {question}\n"
-                    "Answer:"
+                    "You are a helpful assistant.\n\n"
+                    f"USER QUESTION:\n{user_question}\n\n"
+                    "Answer clearly and concisely."
                 )
 
-            try:
-                result = llm(prompt)[0]["generated_text"]
+            raw_answer = llm.text_generation(
+                prompt,
+                max_new_tokens=512,
+                temperature=0.2,
+            )
+            answer = raw_answer.strip()
 
-                # Try to remove the prompt part from the output
-                if "[ANSWER]" in result:
-                    answer = result.split("[ANSWER]", 1)[-1].strip()
-                elif "Answer:" in result:
-                    answer = result.split("Answer:", 1)[-1].strip()
-                else:
-                    answer = result.strip()
+            st.subheader("AI Response:")
+            st.write(answer)
 
-                st.subheader("AI Response:")
-                st.code(answer, language="text")
+            if combined_text:
+                with st.expander("Show combined document text (truncated)"):
+                    st.text(combined_text[:4000])
 
-                if document_text:
-                    with st.expander("Show document text the model saw"):
-                        st.text(document_text)
-
-            except Exception as e:
-                st.error(f"Error running the model: {e}")
+        except Exception as e:
+            st.error(f"Error running the model: {e}")
 
 
 if __name__ == "__main__":
