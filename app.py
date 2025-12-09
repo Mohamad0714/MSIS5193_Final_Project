@@ -8,7 +8,7 @@ import streamlit as st
 from pypdf import PdfReader
 import docx
 from bs4 import BeautifulSoup
-from huggingface_hub import InferenceClient
+from openai import OpenAI
 
 
 # ---------------- Streamlit page config ---------------- #
@@ -20,21 +20,25 @@ st.set_page_config(
 )
 
 
-# ---------------- LLM loading (Hugging Face Inference API) ---------------- #
+# ---------------- LLM loading (Hugging Face router via OpenAI client) ---------------- #
 
 @st.cache_resource
 def load_llm():
     """
-    Create an InferenceClient that calls an instruction-tuned model
-    on the Hugging Face Inference API.
+    Create an OpenAI-compatible client that talks to Hugging Face's
+    router (Inference Providers).
 
     You must define HF_TOKEN in Streamlit Cloud secrets:
         HF_TOKEN = "hf_XXXXXXXXXXXXXXXXXXXXXXXX"
     """
-    # Get token from Streamlit secrets (cloud) or environment (local)
+    # Try Streamlit secrets first (cloud), then fall back to env var (local)
+    hf_token = None
     try:
-        hf_token = st.secrets["HF_TOKEN"]
+        hf_token = st.secrets.get("HF_TOKEN", None)
     except Exception:
+        pass
+
+    if not hf_token:
         hf_token = os.environ.get("HF_TOKEN")
 
     if not hf_token:
@@ -43,11 +47,14 @@ def load_llm():
             "In Streamlit Cloud, go to Settings → Secrets and add HF_TOKEN."
         )
 
-    # Use a public text-generation model
-    model_name = "HuggingFaceH4/zephyr-7b-beta"
+    # Small, inexpensive chat model served by HF Inference
+    model_name = "HuggingFaceTB/SmolLM3-3B:hf-inference"
 
-    client = InferenceClient(model=model_name, token=hf_token)
-    return client
+    client = OpenAI(
+        base_url="https://router.huggingface.co/v1",
+        api_key=hf_token,
+    )
+    return client, model_name
 
 
 # ---------------- File reading helpers ---------------- #
@@ -103,7 +110,7 @@ def extract_text_from_file(uploaded_file):
 
 # ---------------- Post-processing for abbreviation mode ---------------- #
 
-def clean_abbrev_answer(raw_answer):
+def clean_abbrev_answer(raw_answer: str):
     """
     Take the raw LLM output and keep only lines of the form:
         ABBR: full term
@@ -125,6 +132,24 @@ def clean_abbrev_answer(raw_answer):
             clean_lines.append(f"{abbr}: {full}")
 
     return clean_lines
+
+
+# ---------------- Helper to call the model ---------------- #
+
+def call_model_chat(client: OpenAI, model_name: str, prompt: str,
+                    max_tokens: int = 512, temperature: float = 0.0) -> str:
+    """
+    Call the HF router using OpenAI-style chat.completions.
+    Returns the text content of the first choice.
+    """
+    completion = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    # New OpenAI-style clients store the text here:
+    return completion.choices[0].message.content or ""
 
 
 # ---------------- Main app ---------------- #
@@ -168,12 +193,10 @@ def main():
             st.warning("Please enter a question first.")
             return
 
-        # Load model
         try:
-            llm = load_llm()
+            llm, model_name = load_llm()
         except Exception as e:
-            st.error("Error loading the model:")
-            st.exception(e)
+            st.error(f"Error loading the model: {e}")
             return
 
         # -------------- ABBREVIATION MODE -------------- #
@@ -197,15 +220,15 @@ def main():
                 )
 
                 try:
-                    raw_answer = llm.text_generation(
+                    raw_answer = call_model_chat(
+                        llm,
+                        model_name,
                         prompt,
-                        max_new_tokens=256,
+                        max_tokens=256,
                         temperature=0.0,
                     )
-                    raw_answer = raw_answer.strip()
                 except Exception as e:
-                    st.error("Error calling the model:")
-                    st.exception(e)
+                    st.error(f"Error calling the model: {e}")
                     return
 
                 abbrev_lines = clean_abbrev_answer(raw_answer)
@@ -253,9 +276,11 @@ def main():
                     "Answer clearly and concisely."
                 )
 
-            raw_answer = llm.text_generation(
+            raw_answer = call_model_chat(
+                llm,
+                model_name,
                 prompt,
-                max_new_tokens=512,
+                max_tokens=512,
                 temperature=0.2,
             )
             answer = raw_answer.strip()
@@ -268,8 +293,7 @@ def main():
                     st.text(combined_text[:4000])
 
         except Exception as e:
-            st.error("Error running the model:")
-            st.exception(e)
+            st.error(f"Error running the model: {e}")
 
 
 if __name__ == "__main__":
