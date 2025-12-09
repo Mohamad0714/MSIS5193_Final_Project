@@ -43,8 +43,8 @@ def load_llm():
             "In Streamlit Cloud, go to Settings → Secrets and add HF_TOKEN."
         )
 
-    # Model that uses the conversational task
-    model_name = "mistralai/Mistral-7B-Instruct-v0.3"
+    # Use a public text-generation model
+    model_name = "HuggingFaceH4/zephyr-7b-beta"
 
     client = InferenceClient(model=model_name, token=hf_token)
     return client
@@ -156,7 +156,6 @@ def main():
     )
 
     # Decide whether we are in abbreviation mode
-    # Simple heuristic: user mentions 'abbreviation'
     abbreviation_mode = "abbreviation" in user_question.lower()
 
     if abbreviation_mode:
@@ -198,9 +197,12 @@ def main():
                 )
 
                 try:
-                    # conversational task instead of text_generation
-                    conv_out = llm.conversational(prompt)
-                    raw_answer = conv_out.get("generated_text", "").strip()
+                    raw_answer = llm.text_generation(
+                        prompt,
+                        max_new_tokens=256,
+                        temperature=0.0,
+                    )
+                    raw_answer = raw_answer.strip()
                 except Exception as e:
                     st.error("Error calling the model:")
                     st.exception(e)
@@ -251,10 +253,12 @@ def main():
                     "Answer clearly and concisely."
                 )
 
-            # conversational call here too
-            conv_out = llm.conversational(prompt)
-            raw_answer = conv_out.get("generated_text", "").strip()
-            answer = raw_answer
+            raw_answer = llm.text_generation(
+                prompt,
+                max_new_tokens=512,
+                temperature=0.2,
+            )
+            answer = raw_answer.strip()
 
             st.subheader("AI Response:")
             st.write(answer)
