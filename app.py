@@ -25,21 +25,16 @@ st.set_page_config(
 @st.cache_resource
 def load_llm():
     """
-    Create an InferenceClient that calls a small instruction-tuned model
+    Create an InferenceClient that calls an instruction-tuned model
     on the Hugging Face Inference API.
 
     You must define HF_TOKEN in Streamlit Cloud secrets:
         HF_TOKEN = "hf_XXXXXXXXXXXXXXXXXXXXXXXX"
     """
-    # Try Streamlit secrets first (cloud), then fall back to env var (local)
-    hf_token = None
+    # Get token from Streamlit secrets (cloud) or environment (local)
     try:
-        hf_token = st.secrets.get("HF_TOKEN", None)
+        hf_token = st.secrets["HF_TOKEN"]
     except Exception:
-        # st.secrets may not exist when running only in local dev
-        pass
-
-    if not hf_token:
         hf_token = os.environ.get("HF_TOKEN")
 
     if not hf_token:
@@ -48,7 +43,8 @@ def load_llm():
             "In Streamlit Cloud, go to Settings → Secrets and add HF_TOKEN."
         )
 
-    model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+    # Use a very safe public model with Inference API enabled
+    model_name = "mistralai/Mistral-7B-Instruct-v0.3"
 
     client = InferenceClient(model=model_name, token=hf_token)
     return client
@@ -173,10 +169,12 @@ def main():
             st.warning("Please enter a question first.")
             return
 
+        # Load model
         try:
             llm = load_llm()
         except Exception as e:
-            st.error(f"Error loading the model: {e}")
+            st.error("Error loading the model:")
+            st.exception(e)
             return
 
         # -------------- ABBREVIATION MODE -------------- #
@@ -206,7 +204,8 @@ def main():
                         temperature=0.0,
                     )
                 except Exception as e:
-                    st.error(f"Error calling the model: {e}")
+                    st.error("Error calling the model:")
+                    st.exception(e)
                     return
 
                 abbrev_lines = clean_abbrev_answer(raw_answer)
@@ -269,7 +268,8 @@ def main():
                     st.text(combined_text[:4000])
 
         except Exception as e:
-            st.error(f"Error running the model: {e}")
+            st.error("Error running the model:")
+            st.exception(e)
 
 
 if __name__ == "__main__":
