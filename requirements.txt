@@ -1,7 +1,6 @@
 streamlit
-transformers
 pypdf
 python-docx
 beautifulsoup4
-torch
 requests
+huggingface_hub
